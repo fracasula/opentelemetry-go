@@ -17,6 +17,7 @@ package transform // import "go.opentelemetry.io/otel/exporters/otlp/otlpmetric/
 import (
 	"fmt"
 
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	cpb "go.opentelemetry.io/proto/otlp/common/v1"
 	mpb "go.opentelemetry.io/proto/otlp/metrics/v1"
@@ -27,7 +28,7 @@ import (
 // contains invalid ScopeMetrics, an error will be returned along with an OTLP
 // ResourceMetrics that contains partial OTLP ScopeMetrics.
 func ResourceMetrics(rm *metricdata.ResourceMetrics) (*mpb.ResourceMetrics, error) {
-	sms, err := ScopeMetrics(rm.ScopeMetrics)
+	sms, err := ScopeMetrics(rm.ScopeMetrics, rm.Resource.Attributes()...)
 	return &mpb.ResourceMetrics{
 		Resource: &rpb.Resource{
 			Attributes: AttrIter(rm.Resource.Iter()),
@@ -40,11 +41,11 @@ func ResourceMetrics(rm *metricdata.ResourceMetrics) (*mpb.ResourceMetrics, erro
 // ScopeMetrics returns a slice of OTLP ScopeMetrics generated from sms. If
 // sms contains invalid metric values, an error will be returned along with a
 // slice that contains partial OTLP ScopeMetrics.
-func ScopeMetrics(sms []metricdata.ScopeMetrics) ([]*mpb.ScopeMetrics, error) {
+func ScopeMetrics(sms []metricdata.ScopeMetrics, attrs ...attribute.KeyValue) ([]*mpb.ScopeMetrics, error) {
 	errs := &multiErr{datatype: "ScopeMetrics"}
 	out := make([]*mpb.ScopeMetrics, 0, len(sms))
 	for _, sm := range sms {
-		ms, err := Metrics(sm.Metrics)
+		ms, err := Metrics(sm.Metrics, attrs...)
 		if err != nil {
 			errs.append(err)
 		}
@@ -64,11 +65,11 @@ func ScopeMetrics(sms []metricdata.ScopeMetrics) ([]*mpb.ScopeMetrics, error) {
 // Metrics returns a slice of OTLP Metric generated from ms. If ms contains
 // invalid metric values, an error will be returned along with a slice that
 // contains partial OTLP Metrics.
-func Metrics(ms []metricdata.Metrics) ([]*mpb.Metric, error) {
+func Metrics(ms []metricdata.Metrics, attrs ...attribute.KeyValue) ([]*mpb.Metric, error) {
 	errs := &multiErr{datatype: "Metrics"}
 	out := make([]*mpb.Metric, 0, len(ms))
 	for _, m := range ms {
-		o, err := metric(m)
+		o, err := metric(m, attrs...)
 		if err != nil {
 			// Do not include invalid data. Drop the metric, report the error.
 			errs.append(errMetric{m: o, err: err})
@@ -79,7 +80,7 @@ func Metrics(ms []metricdata.Metrics) ([]*mpb.Metric, error) {
 	return out, errs.errOrNil()
 }
 
-func metric(m metricdata.Metrics) (*mpb.Metric, error) {
+func metric(m metricdata.Metrics, attrs ...attribute.KeyValue) (*mpb.Metric, error) {
 	var err error
 	out := &mpb.Metric{
 		Name:        m.Name,
@@ -88,9 +89,9 @@ func metric(m metricdata.Metrics) (*mpb.Metric, error) {
 	}
 	switch a := m.Data.(type) {
 	case metricdata.Gauge[int64]:
-		out.Data = Gauge[int64](a)
+		out.Data = Gauge[int64](a, attrs...)
 	case metricdata.Gauge[float64]:
-		out.Data = Gauge[float64](a)
+		out.Data = Gauge[float64](a, attrs...)
 	case metricdata.Sum[int64]:
 		out.Data, err = Sum[int64](a)
 	case metricdata.Sum[float64]:
@@ -106,10 +107,10 @@ func metric(m metricdata.Metrics) (*mpb.Metric, error) {
 }
 
 // Gauge returns an OTLP Metric_Gauge generated from g.
-func Gauge[N int64 | float64](g metricdata.Gauge[N]) *mpb.Metric_Gauge {
+func Gauge[N int64 | float64](g metricdata.Gauge[N], attrs ...attribute.KeyValue) *mpb.Metric_Gauge {
 	return &mpb.Metric_Gauge{
 		Gauge: &mpb.Gauge{
-			DataPoints: DataPoints(g.DataPoints),
+			DataPoints: DataPoints(g.DataPoints, attrs...),
 		},
 	}
 }
@@ -131,7 +132,7 @@ func Sum[N int64 | float64](s metricdata.Sum[N]) (*mpb.Metric_Sum, error) {
 }
 
 // DataPoints returns a slice of OTLP NumberDataPoint generated from dPts.
-func DataPoints[N int64 | float64](dPts []metricdata.DataPoint[N]) []*mpb.NumberDataPoint {
+func DataPoints[N int64 | float64](dPts []metricdata.DataPoint[N], attrs ...attribute.KeyValue) []*mpb.NumberDataPoint {
 	out := make([]*mpb.NumberDataPoint, 0, len(dPts))
 	for _, dPt := range dPts {
 		ndp := &mpb.NumberDataPoint{
@@ -139,6 +140,8 @@ func DataPoints[N int64 | float64](dPts []metricdata.DataPoint[N]) []*mpb.Number
 			StartTimeUnixNano: uint64(dPt.StartTime.UnixNano()),
 			TimeUnixNano:      uint64(dPt.Time.UnixNano()),
 		}
+		set := attribute.NewSet(attrs...)
+		ndp.Attributes = append(ndp.Attributes, AttrIter(set.Iter())...)
 		switch v := any(dPt.Value).(type) {
 		case int64:
 			ndp.Value = &mpb.NumberDataPoint_AsInt{
