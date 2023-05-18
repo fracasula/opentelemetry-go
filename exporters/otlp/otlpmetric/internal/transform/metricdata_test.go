@@ -411,3 +411,63 @@ func TestTransformations(t *testing.T) {
 	assert.ErrorIs(t, err, errUnknownAggregation)
 	require.Equal(t, pbResourceMetrics, rm)
 }
+
+func TestResourceAttributesPropagation(t *testing.T) {
+	otelMetrics := []metricdata.Metrics{
+		{
+			Name:        "int64-gauge",
+			Description: "Gauge with int64 values",
+			Unit:        "1",
+			Data:        otelGaugeInt64,
+		},
+	}
+
+	otelScopeMetrics := []metricdata.ScopeMetrics{{
+		Scope: instrumentation.Scope{
+			Name:      "test/code/path",
+			Version:   "v0.1.0",
+			SchemaURL: semconv.SchemaURL,
+		},
+		Metrics: otelMetrics,
+	}}
+
+	otelRes := resource.NewWithAttributes(
+		semconv.SchemaURL,
+		semconv.ServiceName("test server"),
+		semconv.ServiceVersion("v0.1.0"),
+		attribute.String("foo", "bar"), // we expect this to be propagated
+	)
+
+	otelResourceMetrics := &metricdata.ResourceMetrics{
+		Resource:     otelRes,
+		ScopeMetrics: otelScopeMetrics,
+	}
+
+	rm, err := ResourceMetrics(otelResourceMetrics)
+	assert.NoError(t, err)
+	assert.Len(t, rm.GetScopeMetrics(), 1)
+	assert.Equal(t, "test/code/path", rm.GetScopeMetrics()[0].GetScope().GetName())
+	assert.Equal(t, "v0.1.0", rm.GetScopeMetrics()[0].GetScope().GetVersion())
+	assert.Len(t, rm.GetScopeMetrics()[0].Metrics, 1)
+
+	actual := rm.GetScopeMetrics()[0].Metrics[0]
+	assert.Equal(t, "int64-gauge", actual.GetName())
+	assert.Equal(t, "Gauge with int64 values", actual.GetDescription())
+	assert.Equal(t, "1", actual.GetUnit())
+	assert.NotNil(t, actual.GetGauge())
+	assert.Len(t, actual.GetGauge().GetDataPoints(), 2)
+
+	fooBar := &cpb.KeyValue{Key: "foo", Value: &cpb.AnyValue{
+		Value: &cpb.AnyValue_StringValue{StringValue: "bar"},
+	}}
+	expectedAttrsFirstDP := []*cpb.KeyValue{
+		fooBar, // comment out this line to make the test pass
+		pbAlice,
+	}
+	assert.Equal(t, expectedAttrsFirstDP, actual.GetGauge().GetDataPoints()[0].Attributes)
+	expectedAttrsSecondDP := []*cpb.KeyValue{
+		fooBar, // comment out this line to make the test pass
+		pbBob,
+	}
+	assert.Equal(t, expectedAttrsSecondDP, actual.GetGauge().GetDataPoints()[1].Attributes)
+}
